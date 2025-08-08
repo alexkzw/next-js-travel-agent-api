@@ -9,12 +9,16 @@ export async function POST(req: Request) {
 
     const system = [
       "You are TravelAgentTS: concise, practical, cost-aware.",
-      "When uncertain, ask one clarifying question.",
-      "If giving an itinerary, include times, transit hints, and rough costs.",
+      "When answering a travel request, ALWAYS return a valid JSON object with keys:",
+      "- summary: 1-sentence summary of the trip",
+      "- plan: day-by-day itinerary (as a string or array)",
+      "- assumptions: list any assumptions you make",
+      "- nextSteps: how the user can confirm or book the trip",
+      "Do not include markdown or extra commentary. JSON only."
     ].join(" ");
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o", // or "gpt-3.5-turbo" if needed
+      model: "gpt-4o", 
       temperature: 0.7,
       messages: [
         { role: "system", content: system },
@@ -22,10 +26,18 @@ export async function POST(req: Request) {
       ]
     });
 
-    const text = completion.choices[0]?.message?.content ?? "";
-    return NextResponse.json({ text });
-  } catch (e: any) {
-    console.error(e);
-    return NextResponse.json({ error: "Agent failed." }, { status: 500 });
+    const raw = completion.choices[0]?.message?.content ?? "";
+    let structured = null;
+    
+    try {
+      structured = JSON.parse(raw);
+    } catch {
+      // fallback: return raw string if parsing fails
+      structured = { summary: "Could not parse response", raw };
+    }
+    return NextResponse.json({ result: structured });
+  }
+  catch (err) {
+    return NextResponse.json({ result: { summary: "Internal error", error: String(err) } }, { status: 500 });
   }
 }
