@@ -1,9 +1,19 @@
 "use client";
 import { useState } from "react";
 
+// Define the expected structure of the agent's response
+interface AgentResult {
+  summary: string;
+  plan: string | string[];
+  assumptions?: string[];
+  nextSteps?: string;
+  raw?: string;
+  error?: string;
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
-  const [answer, setAnswer] = useState<{ result: any } | null>(null);
+  const [answer, setAnswer] = useState<{ result: AgentResult } | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function askAgent() {
@@ -45,11 +55,17 @@ export default function Home() {
           <p>{answer.result.summary}</p>
 
           <h2>Plan:</h2>
-          <pre>{typeof answer.result.plan === "string" ? answer.result.plan : JSON.stringify(answer.result.plan, null, 2)}</pre>
+          <pre>
+            {typeof answer.result.plan === "string"
+              ? answer.result.plan
+              : JSON.stringify(answer.result.plan, null, 2)}
+          </pre>
 
           <h2>Assumptions:</h2>
           <ul>
-            {(answer.result.assumptions ?? []).map((a: string, i: number) => <li key={i}>{a}</li>)}
+            {(answer.result.assumptions ?? []).map((a, i) => (
+              <li key={i}>{a}</li>
+            ))}
           </ul>
 
           <h2>Next Steps:</h2>
@@ -66,4 +82,3 @@ export default function Home() {
     </main>
   );
 }
-
