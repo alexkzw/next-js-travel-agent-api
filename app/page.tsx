@@ -3,7 +3,7 @@ import { useState } from "react";
 
 export default function Home() {
   const [input, setInput] = useState("");
-  const [answer, setAnswer] = useState<string | null>(null);
+  const [answer, setAnswer] = useState<{ result: any } | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function askAgent() {
@@ -15,7 +15,7 @@ export default function Home() {
       body: JSON.stringify({ message: input })
     });
     const data = await res.json();
-    setAnswer(data.text ?? data.error ?? "No response");
+    setAnswer(data);
     setLoading(false);
   }
 
@@ -39,11 +39,31 @@ export default function Home() {
         </button>
       </div>
 
-      {answer && (
+      {answer && answer.result && (
         <div style={{ marginTop: 24, whiteSpace: "pre-wrap" }}>
-          <strong>Agent:</strong> {answer}
+          <h2>Summary:</h2>
+          <p>{answer.result.summary}</p>
+
+          <h2>Plan:</h2>
+          <pre>{typeof answer.result.plan === "string" ? answer.result.plan : JSON.stringify(answer.result.plan, null, 2)}</pre>
+
+          <h2>Assumptions:</h2>
+          <ul>
+            {(answer.result.assumptions ?? []).map((a: string, i: number) => <li key={i}>{a}</li>)}
+          </ul>
+
+          <h2>Next Steps:</h2>
+          <p>{answer.result.nextSteps}</p>
+
+          {answer.result.raw && (
+            <>
+              <h3>Raw output (fallback)</h3>
+              <pre>{answer.result.raw}</pre>
+            </>
+          )}
         </div>
       )}
     </main>
   );
 }
+
