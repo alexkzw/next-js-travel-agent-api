@@ -3,6 +3,8 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+export const runtime = 'nodejs';
+
 export async function POST(req: Request) {
   try {
     const { message } = await req.json() as { message: string };
