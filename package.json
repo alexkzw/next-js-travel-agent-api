@@ -3,14 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "embed": "tsx scripts/embed.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "dependencies": {
+    "@langchain/langgraph": "^0.4.7",
     "next": "15.4.6",
     "openai": "^5.12.1",
+    "pg": "^8.16.3",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "zod": "^3.25.76"
@@ -20,8 +23,11 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.2.1",
+    "dotenv-cli": "^7.4.4",
     "eslint": "^9",
     "eslint-config-next": "15.4.6",
+    "tsx": "^4.20.5",
     "typescript": "^5"
   }
 }
