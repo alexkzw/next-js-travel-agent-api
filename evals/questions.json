@@ -1,0 +1,13 @@
+[
+    {
+      "q": "Give me a 2-day Kyoto plan with an early visit to Maruyama-koen Park and is budget focus.",
+      "must": ["Maruyama-koen Park", "budget"],
+      "minCitations": 1
+    },
+    {
+      "q": "Activities to do after dinner",
+      "must": ["Gion Shimbashi"],
+      "minCitations": 1
+    }
+  ]
+  
