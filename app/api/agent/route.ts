@@ -1,14 +1,17 @@
+// app/api/agent/route.ts
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { z } from "zod";
-import { loadEmbeddings, topK, rerankWithLLM } from "../../../lib/search";
+// NOTE: new unified retrieval import (file OR pgvector) + LLM reranker
+import { retrieveCandidates, rerankWithLLM } from "../../../lib/search";
 
 export const runtime = "nodejs";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const enc = new TextEncoder();
 
-// ------------ small helpers ------------
+/* -------------------------- helpers & utilities -------------------------- */
+
 function parseJsonLoose(raw: string) {
   try { return JSON.parse(raw); } catch {}
   const m = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -28,12 +31,14 @@ function normalizeResult(result: any) {
   return result;
 }
 
-// ------------ currency tool ------------
+/* ------------------------------- currency -------------------------------- */
+
 const CurrencyArgs = z.object({
   amount: z.number().positive(),
   from: z.string().length(3),
   to: z.string().length(3),
 });
+
 async function convertCurrency(args: unknown) {
   const parsed = CurrencyArgs.parse({
     ...args,
@@ -41,20 +46,21 @@ async function convertCurrency(args: unknown) {
     to: String((args as any)?.to ?? "").toUpperCase(),
   });
   const { amount, from, to } = parsed;
+
   const res = await fetch(
     `https://api.frankfurter.app/latest?amount=${amount}&from=${from}&to=${to}`,
     { cache: "no-store" }
   );
   if (!res.ok) throw new Error(`FX API error ${res.status}`);
   const data = await res.json();
-  const rate = data?.rates?.[to];
-  if (typeof rate !== "number") throw new Error("FX API: missing rate");
-  const value = rate; // this API returns amount*fx
+  const val = data?.rates?.[to];
+  if (typeof val !== "number") throw new Error("FX API: missing rate");
   const date = data?.date ?? null;
-  return { amount, from, to, value, rate: value / amount, date, provider: "frankfurter.app" };
+  return { amount, from, to, value: val, rate: val / amount, date, provider: "frankfurter.app" };
 }
 
-// ------------ planner ------------
+/* -------------------------------- planner -------------------------------- */
+
 const PLANNER_SYSTEM = [
   "You are a planner. Decide initial step as JSON.",
   "If the question lacks a clear destination AND either dates or number of days,",
@@ -63,13 +69,12 @@ const PLANNER_SYSTEM = [
   "Otherwise return {\"action\":\"answer\"}.",
 ].join(" ");
 
-// ===================================================================
-// GET: SSE – handshake → planner → optional tool → retrieve + rerank → stream
-// ===================================================================
+/* ============================== GET (SSE) ================================ */
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const message = searchParams.get("message") ?? "";
-  const force = searchParams.get("force"); // dev override
+  const force = searchParams.get("force"); // dev override: 'clarify' | 'answer' | 'use_currency'
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -80,7 +85,7 @@ export async function GET(req: Request) {
       const t0 = Date.now();
 
       try {
-        // Handshake comment so the connection is "open" ASAP
+        // handshake so the browser considers the SSE open
         controller.enqueue(enc.encode(`: sse-handshake\n\n`));
 
         if (!process.env.OPENAI_API_KEY) {
@@ -96,7 +101,7 @@ export async function GET(req: Request) {
           return;
         }
 
-        // ---- planner ----
+        /* ------------------------------- planner ------------------------------- */
         let plan: any = { action: "answer" };
         try {
           const planner = await openai.chat.completions.create({
@@ -114,6 +119,7 @@ export async function GET(req: Request) {
           plan = { action: "answer" };
         }
 
+        // dev overrides to test paths
         if (force === "clarify") plan = { action: "clarify", question: "Which city and what dates/days?" };
         if (force === "answer") plan = { action: "answer" };
         if (force === "use_currency") plan = { action: "use_currency", args: { amount: 100, from: "USD", to: "JPY" } };
@@ -127,7 +133,7 @@ export async function GET(req: Request) {
           return;
         }
 
-        // ---- optional currency tool ----
+        /* ---------------------------- optional tool ---------------------------- */
         let toolNote = "";
         let toolUsed: string | null = null;
         if (plan.action === "use_currency") {
@@ -143,19 +149,21 @@ export async function GET(req: Request) {
           }
         }
 
-        // ---- retrieve + rerank ----
-        let hits: Awaited<ReturnType<typeof loadEmbeddings>> = [];
+        /* -------------------------- retrieval + rerank ------------------------- */
+        let hits: { id: string; file: string; text: string }[] = [];
         try {
+          // 1) embed the query
           const qEmb = await openai.embeddings.create({
             model: "text-embedding-3-small",
             input: message,
           });
 
+          // 2) unified retrieval (file OR pgvector)
           const K0 = Number(process.env.RERANK_CANDIDATES ?? "12");
           const finalK = Number(process.env.RERANK_FINAL_K ?? "4");
-          const items = await loadEmbeddings();
-          const firstHits = topK(items, qEmb.data[0].embedding, K0);
+          const firstHits = await retrieveCandidates(qEmb.data[0].embedding, K0);
 
+          // 3) rerank to final K
           send("tool", { name: "reranker", status: "start", kIn: firstHits.length });
           hits = await rerankWithLLM(message, firstHits, finalK, "gpt-4o-mini");
           send("tool", {
@@ -166,28 +174,19 @@ export async function GET(req: Request) {
           });
         } catch (e: any) {
           send("tool", { name: "reranker", status: "error", error: String(e?.message || e) });
-          // fall back to plain topK(4) so the stream still succeeds
-          try {
-            const qEmb = await openai.embeddings.create({
-              model: "text-embedding-3-small",
-              input: message,
-            });
-            const items = await loadEmbeddings();
-            hits = topK(items, qEmb.data[0].embedding, 4);
-          } catch {
-            hits = [];
-          }
+          hits = []; // fail soft; still try to answer (will be generic)
         }
 
         const sourcesCore = hits.map((h, i) => `Source [${i + 1}] (${h.file}): ${h.text}`).join("\n---\n");
         const sources = toolNote ? `${toolNote}\n---\n${sourcesCore}` : sourcesCore;
 
-        // ---- answer (stream) ----
+        /* -------------------------------- answer -------------------------------- */
         const system =
           "You are TravelAgentTS: concise, practical, cost-aware. " +
           "Use ONLY the provided sources/tool notes to ground facts. " +
           "Return a valid JSON object ONLY (no code fences) with keys: " +
           "summary, plan, assumptions, nextSteps, citations (array of source numbers).";
+
         const user = `User question:\n${message}\n\nContext:\n${sources}`;
 
         let buffer = "";
@@ -221,6 +220,7 @@ export async function GET(req: Request) {
         catch { result = { summary: "Could not parse response", raw: buffer }; }
         result = normalizeResult(result);
 
+        // fill citations + sourceMap if model omitted them
         if (!Array.isArray(result.citations) || result.citations.length === 0) {
           result.citations = hits.map((_, i) => i + 1);
         }
@@ -232,7 +232,7 @@ export async function GET(req: Request) {
         send("done", { ok: true });
         controller.close();
       } catch (err: any) {
-        // LAST-resort: never throw past the stream boundary
+        // never throw past the SSE boundary
         controller.enqueue(enc.encode(`event: agent_error\ndata: ${JSON.stringify({ error: String(err?.message || err) })}\n\n`));
         controller.enqueue(enc.encode(`event: done\ndata: {"ok":false}\n\n`));
         controller.close();
@@ -249,9 +249,9 @@ export async function GET(req: Request) {
   });
 }
 
-// ===================================================================
-// POST: non-stream JSON (authoritative tokens/cost); same flow but simpler
-// ===================================================================
+/* ============================== POST (JSON) ============================== */
+/* Non-stream, returns structured JSON + usage/cost (if you want to show it) */
+
 const PROMPT_RATE = Number(process.env.MODEL_PROMPT_PER_1K ?? "0");
 const COMPLETION_RATE = Number(process.env.MODEL_COMPLETION_PER_1K ?? "0");
 
@@ -260,6 +260,7 @@ export async function POST(req: Request) {
   try {
     const { message } = (await req.json()) as { message: string };
 
+    // planner
     const planner = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
@@ -272,6 +273,7 @@ export async function POST(req: Request) {
     let plan: any = {};
     try { plan = JSON.parse(planner.choices[0]?.message?.content ?? "{}"); } catch {}
 
+    // optional currency
     let toolNote = "";
     let toolUsed: string | null = null;
     if (plan?.action === "use_currency") {
@@ -295,28 +297,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ result, meta });
     }
 
+    // retrieval + rerank (unified)
     const qEmb = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: message,
     });
-
     const K0 = Number(process.env.RERANK_CANDIDATES ?? "12");
     const finalK = Number(process.env.RERANK_FINAL_K ?? "4");
-    const items = await loadEmbeddings();
-    const firstHits = topK(items, qEmb.data[0].embedding, K0);
-    let hits = firstHits;
-    try {
-      hits = await rerankWithLLM(message, firstHits, finalK, "gpt-4o-mini");
-    } catch {}
+    const firstHits = await retrieveCandidates(qEmb.data[0].embedding, K0);
+    const hits = await rerankWithLLM(message, firstHits, finalK, "gpt-4o-mini");
 
-    const sourcesCore = hits.map((h, i) => `Source [${i + 1}] (${h.file}): ${h.text}`).join("\n---\n");
-    const sources = toolNote ? `${toolNote}\n---\n${sourcesCore}` : sourcesCore;
+    const sources = hits.map((h, i) => `Source [${i + 1}] (${h.file}): ${h.text}`).join("\n---\n");
+    const context = toolNote ? `${toolNote}\n---\n${sources}` : sources;
 
+    // answer (non-stream)
     const system =
       "You are TravelAgentTS: concise, practical, cost-aware. " +
       "Use ONLY the provided sources/tool notes to ground facts. " +
       "Return a valid JSON object ONLY with keys: summary, plan, assumptions, nextSteps, citations.";
-    const user = `User question:\n${message}\n\nContext:\n${sources}`;
+    const user = `User question:\n${message}\n\nContext:\n${context}`;
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -332,6 +331,7 @@ export async function POST(req: Request) {
     let result: any;
     try { result = parseJsonLoose(raw); } catch { result = { summary: "Could not parse response", raw }; }
     result = normalizeResult(result);
+
     if (!Array.isArray(result.citations) || result.citations.length === 0) {
       result.citations = hits.map((_, i) => i + 1);
     }
